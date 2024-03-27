@@ -845,4 +845,4 @@ def unregister():
     bpy.utils.unregister_class(VariablesGroup)
     del bpy.types.Scene.custom_props 
 
-register()
+# register()
