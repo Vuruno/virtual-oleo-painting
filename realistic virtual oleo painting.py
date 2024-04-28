@@ -262,16 +262,19 @@ def refresh_and_get_delay(frame_rate = 1, starting_ms = time()):
 
 def move_camera(camera, current_image, desired_image, duration_frames, frame_rate, painting_separation):
     currentCameraPos = initialCameraPos = camera.location[1]
-    finalCameraPos = painting_separation*desired_image
-    finalCameraPos = (finalCameraPos-initialCameraPos)/2
+    desiredCameraPos = painting_separation*desired_image
+    finalCameraPos = (desiredCameraPos-initialCameraPos)/2
 
     for i in range(duration_frames):
         currentCameraPos = -finalCameraPos * cos((pi)*i/duration_frames) + finalCameraPos + initialCameraPos
         camera.location[1] = currentCameraPos
+
+        if i == duration_frames-1:
+            camera.location[1] = desiredCameraPos
         
         try:
             bulb_empty = bpy.data.objects['bulb_empty']
-            bulb_empty.location[1] = currentCameraPos
+            bulb_empty.location[1] = finalCameraPos
         except:
             pass
 
@@ -280,7 +283,7 @@ def move_camera(camera, current_image, desired_image, duration_frames, frame_rat
     
     return desired_image
 
-
+# returns current image, a hand buffer and int value for gesture_detection
 def handle_hands(img, faceDetector, hand_detector, current_image, camera, face, frame_rate, painting_separation, gesture_detection, hand_buffer, total_paintings):
     hands, _ = hand_detector.findHands(img, draw=False, flipType= False)
     if hands:
@@ -288,6 +291,7 @@ def handle_hands(img, faceDetector, hand_detector, current_image, camera, face, 
         x, y, width, height = hand["bbox"]
         lmList = hand["lmList"]
         center = hand["center"]
+        hand_type = hand['type']
 
         if True:
             #cv2.rectangle(img, (leftCorner1), (leftCorner2), (255,0,0), 2)
@@ -295,13 +299,14 @@ def handle_hands(img, faceDetector, hand_detector, current_image, camera, face, 
             
             fingers = hand_detector.fingersUp(hand)
             desired_image = current_image
-                    
+            
+            # if detection mode is active, landmark list is compared to the one in the buffer
             if gesture_detection == 2:
-                if   (lmList[8][0] - hand_buffer["lmList"][8][0] > 8):
+                if  (hand_type == 'Left'):
                     desired_image -= 1
                     gesture_detection = 1 
                     
-                elif (lmList[8][0] - hand_buffer["lmList"][8][0] < -8):
+                elif (hand_type == 'Right'):
                     desired_image += 1
                     gesture_detection = 0
 
@@ -313,9 +318,7 @@ def handle_hands(img, faceDetector, hand_detector, current_image, camera, face, 
             else:
                 gesture_detection = 1  
 
-            print(":", desired_image, total_paintings)
             desired_image = desired_image % total_paintings
-            print("!", desired_image, total_paintings)
     
             if desired_image != current_image:
                 return move_camera(camera, current_image, desired_image, 20, frame_rate, painting_separation), hand, 0
@@ -327,13 +330,35 @@ def handle_hands(img, faceDetector, hand_detector, current_image, camera, face, 
     return current_image, {}, 1
 
 
-def handle_faces(img, faceDetector, cap,):           
+def handle_faces(img, faceDetector, targetDetector, cap, transitionFrames, cur_transition):           
     width  = cap.get(3)
     height  = cap.get(4)
     face = False
 
-    img, faces = faceDetector.findFaceMesh(img, draw=False)
+    static_crop_img = img.copy()
+    _, w, _ = static_crop_img.shape
+    min_w = w // 3
+    max_w = w - min_w   
+    static_crop_img[:, :min_w] = (0,0,0)
+    static_crop_img[:, max_w:] = (0,0,0)
 
+    _, faces = faceDetector.findFaceMesh(img=static_crop_img, draw=False)
+    #cv2.imshow('Target Detector', img_win_1)
+
+    if faces and cur_transition > 0:
+        dynamic_crop_img = img.copy()
+        _, w, _ = dynamic_crop_img.shape
+        min_w = int(w/3 * cur_transition / transitionFrames)
+        max_w = w - min_w
+        dynamic_crop_img[:,:min_w] = (0,0,0)
+        dynamic_crop_img[:,max_w:] = (0,0,0)
+        img = dynamic_crop_img
+        cur_transition -= 1
+
+    elif not faces:
+        cur_transition = transitionFrames
+
+    img, faces = targetDetector.findFaceMesh(img=img, draw=True)
     if faces:
         face = faces[0]
         pointLeft = face[145]
@@ -358,19 +383,20 @@ def handle_faces(img, faceDetector, cap,):
         offsetX = int(offsetX * 2.5)
 
         left = lowerLeftBoundX - offsetX
-        up = lowerBoundY
+        up = (upperBoundY + lowerBoundY) // 2
         right = lowerRightBoundX + safetyXdisplacement + offsetX
         down = lowerBoundY + offsetY
         
     else:
         up = down = left = right = 0
-        eye_center_x = eye_center_y = 0
+        eye_center_x = width/2
+        eye_center_y = height/2
         
     eye_center_x_rad = (eye_center_x - width/2)*(pi/3) / (width/2)
     eye_center_y_rad = -(eye_center_y - height/2)*(pi/3) / (width/2)
 
 
-    return eye_center_x_rad, eye_center_y_rad, (eye_center_x, eye_center_y), face, [up,down,left,right]
+    return eye_center_x_rad, eye_center_y_rad, (eye_center_x, eye_center_y), face, [up,down,left,right], cur_transition, img
 
 
 def set_hdri_pos(eye_center_x, eye_center_y):
@@ -380,10 +406,10 @@ def set_hdri_pos(eye_center_x, eye_center_y):
     except:
         pass
 
-def set_bulb_pos(eye_center_x, eye_center_y, current_image):
+def set_bulb_pos(eye_center_x, eye_center_y, current_image, painting_separation):
     try:
         bulb_empty = bpy.data.objects['bulb_empty']
-        bulb_empty.location[1] = current_image + eye_center_x
+        bulb_empty.location[1] = current_image * painting_separation + eye_center_x
         bulb_empty.location[2] = eye_center_y
     except:
         pass
@@ -397,6 +423,9 @@ def I3D(hand_frames_skip, frame_rate, camera, painting_separation, use_cam, show
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 10000)
 
     # INSTANCIATE Face AND Hand DETECTION MODULES
+    targetDetector = FaceMeshDetector(maxFaces=1, minDetectionCon=0.3)
+    transitionFrames = 5
+    cur_transition = transitionFrames
     faceDetector = FaceMeshDetector(maxFaces=1, minDetectionCon=0.3)
     hand_detector = HandDetector(detectionCon=0.4, maxHands=1, minTrackCon=0.5)
     gesture_detection = 1    # 0: Don't detect (just detected), 1: Can detect (out of box // no finger postiton), 2: detecting
@@ -413,6 +442,7 @@ def I3D(hand_frames_skip, frame_rate, camera, painting_separation, use_cam, show
     print(f">> Recognition Started")
 
     while True:
+        
         start_time = time()
         # CAPTURE IMAGE FROM CAMERA   
         _, img = cap.read() 
@@ -422,7 +452,7 @@ def I3D(hand_frames_skip, frame_rate, camera, painting_separation, use_cam, show
             
         # GET FACE POSITION, in rad
         if (gesture_detection!=2):
-            face_pos_x, face_pos_y, centre_point, face, hand_detect_rect = handle_faces(img, faceDetector, cap)
+            face_pos_x, face_pos_y, centre_point, face, hand_detect_rect, cur_transition, img = handle_faces(img, faceDetector, targetDetector, cap, transitionFrames, cur_transition)
 
         crop_img = img[hand_detect_rect[0]:hand_detect_rect[1], hand_detect_rect[2]:hand_detect_rect[3]]
 
@@ -469,11 +499,11 @@ def I3D(hand_frames_skip, frame_rate, camera, painting_separation, use_cam, show
                 #                     1, (255, 255, 255), 2)
 
             if face:
-                cv2.rectangle(img,(hand_detect_rect[2], hand_detect_rect[0]), (hand_detect_rect[3], hand_detect_rect[1]), (150, 150, 150), 2)
+                cv2.rectangle(img,(hand_detect_rect[2], hand_detect_rect[0]), (hand_detect_rect[3], hand_detect_rect[1]), (200, 200, 200), 2)
 
-                cv2.rectangle(img,(face[234][0],face[10][1]), (face[454][0], face[152][1]), (255,255,255), 2)
+                cv2.rectangle(img,(face[234][0],face[10][1]), (face[454][0], face[152][1]), (255,0,0), 2)
                 
-                cv2.circle(img, centre_point, 4, (255,0,0), 8)
+                cv2.circle(img, centre_point, 4, (255,0,0), 10)
                 # for ix, punto in enumerate(face):
                 #     cv2.putText(img, f"{ix}", (punto[0], punto[1]), cv2.FONT_HERSHEY_PLAIN,
                 #                     1, (ix*2,0,255), 1)
@@ -496,8 +526,10 @@ def I3D(hand_frames_skip, frame_rate, camera, painting_separation, use_cam, show
 
 
         # SET ANGLE TO HDRI
-        set_hdri_pos(face_pos_x, face_pos_y)
-        set_bulb_pos(face_pos_x, face_pos_y, current_image)
+        print(face_pos_x, face_pos_y)
+        if face_pos_x + face_pos_y != 0:
+            set_hdri_pos(face_pos_x, face_pos_y)
+            set_bulb_pos(face_pos_x, face_pos_y, current_image, painting_separation)
         
         # UPDATE SCREEN and SLEEP
         frames_count += 1
@@ -564,9 +596,9 @@ This part creates the interface of buttons and inputs to modify the parameters b
 
 # Group of internal variables
 class VariablesGroup(bpy.types.PropertyGroup):
-    HDRI_path:          bpy.props.StringProperty(default="C:/Users/bruno/Documents/uptpdrive/bruno_capstone/iZone/virtual_museum/poly_haven_studio_4k.hdr")
+    HDRI_path:          bpy.props.StringProperty(default='"C:/Users/aleja/Downloads/20240423 I-Zone 360HDR/20240423 I-Zone 360HD/Scene5_Compressed.exr"')
     init_rotation:      bpy.props.FloatProperty(soft_min=0, soft_max=360, default=0.0, unit="ROTATION")
-    paintings_folder:   bpy.props.StringProperty(default='C:/Users/bruno/Documents/uptpdrive/bruno_capstone/virtual-oleo-painting-main/paintings-landscape')
+    paintings_folder:   bpy.props.StringProperty(default="C:/Users/aleja/Downloads/paintings-landscape")
     hdri_strength:      bpy.props.FloatProperty(soft_min=0, soft_max=10, default=1.0)
     bulb_pos_x:         bpy.props.FloatProperty(default=0.5)
     bulb_pos_y:         bpy.props.FloatProperty(default=0.0)
@@ -845,4 +877,4 @@ def unregister():
     bpy.utils.unregister_class(VariablesGroup)
     del bpy.types.Scene.custom_props 
 
-# register()
+register()
